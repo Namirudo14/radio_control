@@ -2,71 +2,105 @@
 #include <WiFi.h>
 #include <esp_wifi.h>
 
-
-const int AIN1 = 16;
-const int AIN2 = 17;
-const int BIN1 = 18;
-const int BIN2 = 19;
+const int AIN1 = 16; // 左モータ用 前進側
+const int AIN2 = 17; // 左モータ用 後退側
+const int BIN1 = 18; // 右モータ用 前進側
+const int BIN2 = 19; // 右モータ用 後退側
 
 typedef struct {
-  uint8_t forward;
-  uint8_t backward;
+  uint8_t left;   // 0-200
+  uint8_t right;  // 0-200
+  uint8_t dir;    // 0=停止, 1=前進, 2=後退
 } MotorCommand;
 
-/// モーターの初期設定（出力ピン設定） ///
-void SetupMotors() {
-  pinMode(AIN1, OUTPUT);
-  pinMode(AIN2, OUTPUT);
-  pinMode(BIN1, OUTPUT);
-  pinMode(BIN2, OUTPUT);
+// PWM設定
+const uint32_t PWM_FREQ = 10000;   // 10kHz
+const uint8_t  PWM_RES  = 8;       // 8bit (0..255)
+const int      SCALE_MAX_INPUT = 200;
+
+inline uint8_t scaleToPwm(uint8_t v) {
+  return (uint8_t)map(v, 0, SCALE_MAX_INPUT, 0, (1 << PWM_RES) - 1);
 }
 
-/// モーターを制御する関数 ///
-/// forward: 前進, backward: 後退 ///
-void DriveMotors(uint8_t forward, uint8_t backward) {
-  if (forward > 0) {
-    digitalWrite(AIN1, HIGH);
-    digitalWrite(AIN2, LOW);
-    digitalWrite(BIN1, HIGH);
-    digitalWrite(BIN2, LOW);
-  } else if (backward > 0) {
-    digitalWrite(AIN1, LOW);
-    digitalWrite(AIN2, HIGH);
-    digitalWrite(BIN1, LOW);
-    digitalWrite(BIN2, HIGH);
-  } else {
-    digitalWrite(AIN1, LOW);
-    digitalWrite(AIN2, LOW);
-    digitalWrite(BIN1, LOW);
-    digitalWrite(BIN2, LOW);
+void SetupMotors() {
+  // v3 API: ピンごとにアタッチ（チャネルは自動割当）
+  ledcAttach(AIN1, PWM_FREQ, PWM_RES);
+  ledcAttach(AIN2, PWM_FREQ, PWM_RES);
+  ledcAttach(BIN1, PWM_FREQ, PWM_RES);
+  ledcAttach(BIN2, PWM_FREQ, PWM_RES);
+
+  // 初期は全停止
+  ledcWrite(AIN1, 0);
+  ledcWrite(AIN2, 0);
+  ledcWrite(BIN1, 0);
+  ledcWrite(BIN2, 0);
+}
+
+void DriveStop() {
+  ledcWrite(AIN1, 0);
+  ledcWrite(AIN2, 0);
+  ledcWrite(BIN1, 0);
+  ledcWrite(BIN2, 0);
+}
+
+void DriveForward(uint8_t left, uint8_t right) {
+  uint8_t lp = scaleToPwm(left);
+  uint8_t rp = scaleToPwm(right);
+  // 前進側だけPWM、反対側はLOW
+  ledcWrite(AIN2, 0);
+  ledcWrite(BIN2, 0);
+  ledcWrite(AIN1, lp);
+  ledcWrite(BIN1, rp);
+}
+
+void DriveBackward(uint8_t left, uint8_t right) {
+  uint8_t lp = scaleToPwm(left);
+  uint8_t rp = scaleToPwm(right);
+  // 後退側だけPWM、反対側はLOW
+  ledcWrite(AIN1, 0);
+  ledcWrite(BIN1, 0);
+  ledcWrite(AIN2, lp);
+  ledcWrite(BIN2, rp);
+}
+
+void ApplyMotorCommand(const MotorCommand &c) {
+  switch (c.dir) {
+    case 1: DriveForward(c.left, c.right); break;
+    case 2: DriveBackward(c.left, c.right); break;
+    default: DriveStop(); break;
   }
 }
 
-/// ESP-NOWでデータを受信したときのコールバック関数 ///
-void OnReceive(const esp_now_recv_info_t* recvInfo, const uint8_t* data, int len) {
-  MotorCommand command;
-  memcpy(&command, data, sizeof(command));
-  DriveMotors(command.forward, command.backward);
+// 受信コールバック
+void OnReceive(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
+  if (len < (int)sizeof(MotorCommand)) return;
+  MotorCommand c;
+  memcpy(&c, data, sizeof(c));
+  ApplyMotorCommand(c);
 
-  const uint8_t* mac = recvInfo->src_addr;
-  Serial.printf("Received from %02X:%02X:%02X:%02X:%02X:%02X\n",
-    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  const uint8_t* mac = info->src_addr;
+  Serial.printf("RX %02X:%02X:%02X:%02X:%02X:%02X | L:%d R:%d DIR:%d\n",
+    mac[0],mac[1],mac[2],mac[3],mac[4],mac[5], c.left, c.right, c.dir);
 }
 
 void setup() {
   Serial.begin(115200);
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
-  Serial.print("ESP32 MAC Address: ");
+
+  Serial.print("Receiver MAC Address: ");
   Serial.println(WiFi.macAddress());
 
   SetupMotors();
 
   if (esp_now_init() == ESP_OK) {
     esp_now_register_recv_cb(OnReceive);
+    Serial.println("ESP-NOW Receiver Ready");
+  } else {
+    Serial.println("ESP-NOW init failed");
   }
 }
 
 void loop() {
-  // メインループでは何もしない（受信時に処理）
+  // 受信で駆動
 }
